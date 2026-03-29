@@ -1,0 +1,19 @@
+services:
+  server:
+    image: paperclipai/paperclip:latest
+    ports:
+      - "3100:3100"
+    environment:
+      DATABASE_URL: postgresql://neondb_owner:npg_ou2hlK7gIzbx@ep-shy-frog-ad02q0uh-pooler.c-2.us-east-1.aws.neon.tech/paperclip?sslmode=require&channel_binding=require
+      PORT: "3100"
+      SERVE_UI: "true"
+      PAPERCLIP_DEPLOYMENT_MODE: "authenticated"
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: "public"
+      PAPERCLIP_PUBLIC_BASE_URL: "https://paperclip.firmoncloud.com"
+      BETTER_AUTH_SECRET: "jyCp2A61cKtUnY2U9Kt09Lv1RFUM8ptpwkWs6vZya3JWRzFWeUUqg4Xbsj8RErj5"
+    volumes:
+      - paperclip-data:/paperclip
+    restart: unless-stopped
+
+volumes:
+  paperclip-data:
