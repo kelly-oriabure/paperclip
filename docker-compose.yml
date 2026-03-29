@@ -1,38 +1,140 @@
-services:
-  db:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_USER: paperclip
-      POSTGRES_PASSWORD: paperclip
-      POSTGRES_DB: paperclip
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U paperclip -d paperclip"]
-      interval: 2s
-      timeout: 5s
-      retries: 30
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
+# Combined OpenClaw + Paperclip Docker Compose
+# Both services share a custom network so Paperclip can reach the
+# OpenClaw gateway via service name: openclaw-gateway:18789
+#
+# Usage:
+#   docker compose up -d
+#   docker compose logs -f paperclip
+#
+# Required: .env file with OPENCLAW_GATEWAY_TOKEN and model API keys
 
-  server:
-    build: .
-    ports:
-      - "3100:3100"
+services:
+  # ---------------------------------------------------------------------------
+  # OpenClaw Gateway — WebSocket relay + session routing
+  # ---------------------------------------------------------------------------
+  openclaw-gateway:
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
+    container_name: openclaw-gateway
     environment:
-      DATABASE_URL: postgres://paperclip:paperclip@db:5432/paperclip
+      HOME: /home/node
+      TERM: xterm-256color
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-jyCp2A61cKtUnY2U9Kt09Lv1RFUM8ptpwkWs6vZya3JWRzFWeUUqg4Xbsj8RErj5}
+      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      BRAVE_API_KEY: ${BRAVE_API_KEY:-}
+    volumes:
+      - openclaw-config:/home/node/.openclaw
+      - openclaw-workspace:/home/node/.openclaw/workspace
+    ports:
+      - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
+    init: true
+    restart: unless-stopped
+    command:
+      [
+        "node", "dist/index.js", "gateway",
+        "--bind", "${OPENCLAW_GATEWAY_BIND:-0.0.0.0}",
+        "--port", "18789",
+      ]
+    networks:
+      - claw-network
+    healthcheck:
+      test:
+        [
+          "CMD", "node", "-e",
+          "fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # OpenClaw CLI — background agent session manager (shares gateway network)
+  # ---------------------------------------------------------------------------
+  openclaw-cli:
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
+    container_name: openclaw-cli
+    network_mode: "service:openclaw-gateway"
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      HOME: /home/node
+      TERM: xterm-256color
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-jyCp2A61cKtUnY2U9Kt09Lv1RFUM8ptpwkWs6vZya3JWRzFWeUUqg4Xbsj8RErj5}
+      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      BROWSER: echo
+    volumes:
+      - openclaw-config:/home/node/.openclaw
+      - openclaw-workspace:/home/node/.openclaw/workspace
+    stdin_open: true
+    tty: true
+    init: true
+    entrypoint: ["node", "dist/index.js"]
+    depends_on:
+      - openclaw-gateway
+
+  # ---------------------------------------------------------------------------
+  # Paperclip — AI Company Control Plane
+  # Connects to OpenClaw gateway at ws://openclaw-gateway:18789
+  # ---------------------------------------------------------------------------
+  paperclip:
+    image: ${PAPERCLIP_IMAGE:-obehiaye/paperclip:latest}
+    container_name: paperclip
+    environment:
+      NODE_ENV: production
+      HOME: /paperclip
+      HOST: "0.0.0.0"
       PORT: "3100"
       SERVE_UI: "true"
-      PAPERCLIP_DEPLOYMENT_MODE: "authenticated"
-      PAPERCLIP_DEPLOYMENT_EXPOSURE: "private"
-      PAPERCLIP_PUBLIC_URL: "${PAPERCLIP_PUBLIC_URL:-http://localhost:3100}"
-      BETTER_AUTH_SECRET: "${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set}"
+      PAPERCLIP_HOME: /paperclip
+      PAPERCLIP_INSTANCE_ID: default
+      PAPERCLIP_CONFIG: /paperclip/instances/default/config.json
+      PAPERCLIP_DEPLOYMENT_MODE: authenticated
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: private
+      PAPERCLIP_PUBLIC_URL: ${PAPERCLIP_PUBLIC_URL:-https://paperclip.firmoncloud.com}
+      PAPERCLIP_AUTH_BASE_URL_MODE: explicit
+      PAPERCLIP_ALLOWED_HOSTNAMES: ${PAPERCLIP_ALLOWED_HOSTNAMES:-paperclip.firmoncloud.com}
+      PAPERCLIP_DB_CONNECTION_STRING: ${PAPERCLIP_DB_CONNECTION_STRING:-}
+      # Allow WebSocket connections to OpenClaw gateway over private network
+      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: "1"
     volumes:
       - paperclip-data:/paperclip
+    ports:
+      - "${PAPERCLIP_PORT:-3101}:3100"
+    init: true
+    restart: unless-stopped
+    networks:
+      - claw-network
     depends_on:
-      db:
+      openclaw-gateway:
         condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD", "node", "-e",
+          "fetch('http://127.0.0.1:3100/api/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
 volumes:
-  pgdata:
+  openclaw-config:
+  openclaw-workspace:
   paperclip-data:
+
+networks:
+  claw-network:
+    driver: bridge
+    name: claw-network
